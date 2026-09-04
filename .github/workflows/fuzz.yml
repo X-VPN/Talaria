@@ -1,0 +1,67 @@
+name: Fuzz
+
+on:
+  schedule:
+    # Nightly. Fuzzing finds regressions that the committed seed corpus does
+    # not, so it runs on a timer rather than per-commit.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: "Duration to run each target, e.g. 5m"
+        required: false
+        default: "5m"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: ${{ matrix.package }} ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { package: ./protocol/vpnpacket, target: FuzzReadVpnPacketFromBytes }
+          - { package: ./internal/ippacket, target: FuzzParseIPPacket }
+          - { package: ./protocol/udptls, target: FuzzRetryCookieGate }
+          - { package: ./protocol/udptls, target: FuzzHandshakeAuthPacket }
+          - { package: ./protocol/udptls, target: FuzzHandshakeInboundPacket }
+          - { package: ./protocol/udptls, target: FuzzEncryptedRecord }
+          - { package: ./internal/controlframe, target: FuzzConnRead }
+          - { package: ./transport/socks5tls, target: FuzzSOCKS5RequestParsing }
+          - { package: ./transport/socks5tls, target: FuzzDecodeCredentials }
+          - { package: ./server, target: FuzzControlPreAuthStateMachine }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Fuzz ${{ matrix.target }}
+        env:
+          FUZZTIME: ${{ inputs.fuzztime || '5m' }}
+        run: |
+          go test ${{ matrix.package }} \
+            -run '^$' \
+            -fuzz '^${{ matrix.target }}$' \
+            -fuzztime "$FUZZTIME"
+
+      # A crasher is only useful if it comes back with the run. Committing it to
+      # testdata/fuzz turns it into a permanent regression seed.
+      #
+      # Note when triaging a red run: Go's fuzzing engine can report
+      # "context deadline exceeded" at shutdown without any failing input. A real
+      # finding always writes a file under testdata/fuzz, so check this artifact
+      # first - if it is empty, re-run before investigating the target.
+      - name: Upload crashers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus-${{ matrix.target }}
+          path: |
+            **/testdata/fuzz/**
+            ~/.cache/go-build/fuzz/**
+          if-no-files-found: ignore
