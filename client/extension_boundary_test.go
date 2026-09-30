@@ -480,7 +480,7 @@ func (e *singleBorrowedEndpoint) ReadPayloadBorrowed() ([]byte, func(), error) {
 		return nil, nil, io.EOF
 	}
 	e.read = true
-	return []byte("payload"), func() { e.releases++ }, nil
+	return testIPv4Packet(), func() { e.releases++ }, nil
 }
 
 type panicBoundaryTun struct{ closed chan struct{} }
