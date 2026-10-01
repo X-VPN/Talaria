@@ -295,6 +295,9 @@ func TestClientTLSConfigRejectsUnsafeOrIncompleteConfig(t *testing.T) {
 		{name: "missing server name", cfg: &tls.Config{RootCAs: x509.NewCertPool()}},
 		{name: "missing trust roots", cfg: &tls.Config{ServerName: "vpn.example"}},
 		{name: "disabled verification", cfg: &tls.Config{ServerName: "vpn.example", RootCAs: x509.NewCertPool(), InsecureSkipVerify: true}},
+		{name: "Rand", cfg: &tls.Config{ServerName: "vpn.example", RootCAs: x509.NewCertPool(), Rand: strings.NewReader("")}},
+		{name: "Time", cfg: &tls.Config{ServerName: "vpn.example", RootCAs: x509.NewCertPool(), Time: time.Now}},
+		{name: "KeyLogWriter", cfg: &tls.Config{ServerName: "vpn.example", RootCAs: x509.NewCertPool(), KeyLogWriter: &bytes.Buffer{}}},
 		{name: "maximum version below TLS 1.3", cfg: &tls.Config{ServerName: "vpn.example", RootCAs: x509.NewCertPool(), MaxVersion: tls.VersionTLS12}},
 		{name: "minimum version above TLS 1.3", cfg: &tls.Config{ServerName: "vpn.example", RootCAs: x509.NewCertPool(), MinVersion: tls.VersionTLS13 + 1}},
 	}

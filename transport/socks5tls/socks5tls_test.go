@@ -1417,16 +1417,30 @@ func TestClientRejectsStaleAndCrossClientGrantActivation(t *testing.T) {
 	}
 }
 
-func TestClientRejectsDisabledCertificateVerification(t *testing.T) {
-	_, err := NewClient(ClientConfig{WireIdentity: "vpn.test", WireSecret: testTalariaTCPWireSecret,
-		Address: "127.0.0.1:443",
-		TLSConfig: &tls.Config{
-			ServerName:         "vpn.test",
-			InsecureSkipVerify: true,
-		},
-	})
-	if err == nil {
-		t.Fatal("client accepted InsecureSkipVerify")
+func TestClientRejectsUnsafeTLSConfig(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *tls.Config
+	}{
+		{name: "disabled verification", cfg: &tls.Config{InsecureSkipVerify: true}},
+		{name: "Rand", cfg: &tls.Config{Rand: rand.Reader}},
+		{name: "Time", cfg: &tls.Config{Time: time.Now}},
+		{name: "KeyLogWriter", cfg: &tls.Config{KeyLogWriter: io.Discard}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.cfg.ServerName = "vpn.test"
+			client, err := NewClient(ClientConfig{WireIdentity: "vpn.test", WireSecret: testTalariaTCPWireSecret,
+				Address:   "127.0.0.1:443",
+				TLSConfig: tt.cfg,
+			})
+			if client != nil {
+				defer client.Close()
+			}
+			if err == nil {
+				t.Fatal("client accepted unsafe TLS config")
+			}
+		})
 	}
 }
 

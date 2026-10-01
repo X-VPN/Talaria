@@ -904,6 +904,9 @@ func newClientTLSConfig(req NewDialerReq) (*tls.Config, error) {
 	if req.TLSConfig == nil {
 		return nil, fmt.Errorf("TalariaUDP tls_config is required")
 	}
+	if req.TLSConfig.Rand != nil || req.TLSConfig.Time != nil || req.TLSConfig.KeyLogWriter != nil {
+		return nil, fmt.Errorf("TalariaUDP tls Rand, Time, and KeyLogWriter hooks are not supported")
+	}
 	serverName := strings.TrimSpace(req.TLSConfig.ServerName)
 	if serverName == "" {
 		return nil, fmt.Errorf("TalariaUDP server_name is required")

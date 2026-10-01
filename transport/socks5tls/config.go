@@ -90,6 +90,9 @@ func normalizeClientTLSConfig(cfg *tls.Config) (*tls.Config, error) {
 	if cfg == nil {
 		return nil, errors.New("client tls config is required")
 	}
+	if cfg.Rand != nil || cfg.Time != nil || cfg.KeyLogWriter != nil {
+		return nil, errors.New("client tls Rand, Time, and KeyLogWriter hooks are not supported")
+	}
 	if cfg.InsecureSkipVerify {
 		return nil, errors.New("client tls certificate verification cannot be disabled")
 	}
