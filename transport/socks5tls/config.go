@@ -170,6 +170,9 @@ func validateStaticServerCertificate(certificate tls.Certificate) (*x509.Certifi
 		if key == nil || key.N == nil || key.E <= 0 || !ok || !key.PublicKey.Equal(publicKey) {
 			return nil, errors.New("server tls certificate private key is invalid")
 		}
+		if key.N.BitLen() < 2048 {
+			return nil, errors.New("server tls RSA key must be at least 2048 bits")
+		}
 	case *ecdsa.PrivateKey:
 		publicKey, ok := leaf.PublicKey.(*ecdsa.PublicKey)
 		if key == nil || key.D == nil || key.X == nil || key.Y == nil ||

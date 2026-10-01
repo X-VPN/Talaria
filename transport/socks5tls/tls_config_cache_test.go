@@ -5,9 +5,12 @@ package socks5tls
 
 import (
 	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"io"
+	"math/big"
 	"testing"
 	"time"
 )
@@ -155,6 +158,46 @@ func TestNewServerRejectsCustomTLSPrivateKey(t *testing.T) {
 		t.Fatalf("server result = %v, %v", server, err)
 	}
 	_ = listener.Close()
+}
+
+func TestNormalizeServerTLSConfigRSAKeySize(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		bits    int
+		wantErr bool
+	}{
+		{name: "1024 bits", bits: 1024, wantErr: true},
+		{name: "2047 bits", bits: 2047, wantErr: true},
+		{name: "2048 bits", bits: 2048},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			key, err := rsa.GenerateKey(rand.Reader, tt.bits)
+			if err != nil {
+				t.Fatal(err)
+			}
+			template := &x509.Certificate{
+				SerialNumber:       big.NewInt(1),
+				SignatureAlgorithm: x509.SHA256WithRSA,
+				NotBefore:          time.Now().Add(-time.Minute),
+				NotAfter:           time.Now().Add(time.Hour),
+			}
+			der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = normalizeServerTLSConfig(&tls.Config{Certificates: []tls.Certificate{{
+				Certificate: [][]byte{der},
+				PrivateKey:  key,
+			}}})
+			if tt.wantErr {
+				if err == nil || err.Error() != "server tls RSA key must be at least 2048 bits" {
+					t.Fatalf("expected RSA key size error, got %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
 }
 
 func TestNewServerRejectsTLSClientAuthentication(t *testing.T) {

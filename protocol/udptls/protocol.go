@@ -21,6 +21,7 @@ package udptls
 import (
 	"context"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -401,6 +402,10 @@ func NewListener(req NewListenerReq) (*Listener, error) {
 	if err != nil {
 		wire.Close()
 		return nil, fmt.Errorf("TalariaUDP certificate: %w", err)
+	}
+	if key, ok := certificate.PrivateKey.(*rsa.PrivateKey); ok && key.N.BitLen() < 2048 {
+		wire.Close()
+		return nil, errors.New("TalariaUDP certificate RSA key must be at least 2048 bits")
 	}
 	getCertificate := func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &certificate, nil }
 	carrierMaxPacket := wire.packetSize(wireMaxPacket)

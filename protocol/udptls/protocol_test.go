@@ -6,11 +6,15 @@ package udptls
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"math/big"
 	"net"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -209,6 +213,46 @@ func TestNewListenerRejectsInvalidCertificateBeforeListen(t *testing.T) {
 	}
 	if called {
 		t.Fatal("listener opened a packet connection before validating its certificate")
+	}
+}
+
+func TestNewListenerRSAKeyStrength(t *testing.T) {
+	for _, bits := range []int{1024, 2047, 2048} {
+		t.Run(strconv.Itoa(bits), func(t *testing.T) {
+			key, err := rsa.GenerateKey(rand.Reader, bits)
+			if err != nil {
+				t.Fatal(err)
+			}
+			template := &x509.Certificate{
+				SerialNumber:       big.NewInt(1),
+				NotBefore:          time.Now().Add(-time.Hour),
+				NotAfter:           time.Now().Add(time.Hour),
+				SignatureAlgorithm: x509.SHA256WithRSA,
+			}
+			der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			listenErr := errors.New("stop before listen")
+			called := false
+			_, err = NewListener(NewListenerReq{
+				CertPEM: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})),
+				KeyPEM:  string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})),
+				ListenPacket: func(string, string) (net.PacketConn, error) {
+					called = true
+					return nil, listenErr
+				},
+				WireSecret:   bytes.Repeat([]byte{0x24}, minimumWireSecretSize),
+				WireIdentity: testWireIdentity,
+			})
+			if bits < 2048 {
+				if called || err == nil || !strings.Contains(err.Error(), "at least 2048 bits") {
+					t.Fatalf("weak RSA certificate: listen called=%v, err=%v", called, err)
+				}
+			} else if !called || !errors.Is(err, listenErr) {
+				t.Fatalf("RSA-2048 certificate rejected: listen called=%v, err=%v", called, err)
+			}
+		})
 	}
 }
 
