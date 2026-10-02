@@ -19,6 +19,43 @@ import (
 	"github.com/things-go/go-socks5/statute"
 )
 
+func TestDecodeCredentialsBytesCanonical(t *testing.T) {
+	wantToken := [coretransport.DataTokenSize]byte{0xfb, 0xff}
+	password := base64.RawURLEncoding.EncodeToString(wantToken[:])
+	tests := []struct {
+		name, user, password string
+		wantID               uint64
+	}{
+		{name: "canonical", user: "7", password: password, wantID: 7},
+		{name: "maximum ID", user: "18446744073709551615", password: password, wantID: ^uint64(0)},
+		{name: "leading zeros", user: "007", password: password},
+		{name: "zero ID", user: "0", password: password},
+		{name: "overflow ID", user: "18446744073709551616", password: password},
+		{name: "CR", user: "7", password: password[:10] + "\r" + password[10:]},
+		{name: "LF", user: "7", password: password[:10] + "\n" + password[10:]},
+		{name: "CR at canonical length", user: "7", password: password[:10] + "\r" + password[11:]},
+		{name: "LF at canonical length", user: "7", password: password[:10] + "\n" + password[11:]},
+		{name: "nonzero unused bits", user: "7", password: password[:len(password)-1] + "B"},
+		{name: "padding", user: "7", password: password + "="},
+		{name: "short token", user: "7", password: password[:len(password)-1]},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			token := [coretransport.DataTokenSize]byte{0xaa}
+			id, ok := decodeCredentialsBytes([]byte(tt.user), []byte(tt.password), &token)
+			if id != tt.wantID || ok != (tt.wantID != 0) {
+				t.Fatalf("decoded ID=%d, ok=%v; want ID=%d", id, ok, tt.wantID)
+			}
+			if ok && token != wantToken {
+				t.Fatal("decoded token differs from input")
+			}
+			if !ok && token != [coretransport.DataTokenSize]byte{} {
+				t.Fatal("rejected credentials retained token bytes")
+			}
+		})
+	}
+}
+
 func TestSessionAuthenticatorRetainsOnlySessionIdentity(t *testing.T) {
 	now := time.Unix(100, 0)
 	grant, err := coretransport.NewSessionGrant(42, 7, now, time.Minute)
