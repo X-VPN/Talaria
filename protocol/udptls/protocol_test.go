@@ -6,10 +6,12 @@ package udptls
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
 	"math/big"
@@ -251,6 +253,104 @@ func TestNewListenerRSAKeyStrength(t *testing.T) {
 				}
 			} else if !called || !errors.Is(err, listenErr) {
 				t.Fatalf("RSA-2048 certificate rejected: listen called=%v, err=%v", called, err)
+			}
+		})
+	}
+}
+
+func TestNewListenerCAKeyStrength(t *testing.T) {
+	certificate, _ := newHandshakeTestCertificate(t)
+	serverKey := certificate.PrivateKey.(crypto.Signer)
+	keyDER, err := x509.MarshalPKCS8PrivateKey(serverKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))
+	rsaKeys := make(map[int]crypto.Signer)
+	for _, bits := range []int{1024, 2047, 2048} {
+		key, err := rsa.GenerateKey(rand.Reader, bits)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rsaKeys[bits] = key
+	}
+	const weakRSA = "TalariaUDP CA RSA key must be at least 2048 bits"
+	for _, tt := range []struct {
+		name         string
+		intermediate crypto.Signer
+		root         crypto.Signer
+		malformed    bool
+		wantErr      string
+	}{
+		{name: "1024-bit intermediate", intermediate: rsaKeys[1024], root: rsaKeys[2048], wantErr: weakRSA},
+		{name: "1024-bit root", intermediate: rsaKeys[2048], root: rsaKeys[1024], wantErr: weakRSA},
+		{name: "2047-bit intermediate", intermediate: rsaKeys[2047], root: rsaKeys[2048], wantErr: weakRSA},
+		{name: "2048-bit CAs", intermediate: rsaKeys[2048], root: rsaKeys[2048]},
+		{name: "ECDSA CAs", intermediate: serverKey, root: serverKey},
+		{name: "malformed intermediate", intermediate: rsaKeys[2048], root: rsaKeys[2048], malformed: true, wantErr: "TalariaUDP CA certificate is invalid"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			keys := []crypto.Signer{serverKey, tt.intermediate, tt.root}
+			names := []string{"vpn.test", "intermediate", "root"}
+			chain := make([][]byte, len(keys))
+			var parent *x509.Certificate
+			var signer crypto.Signer
+			for i := len(keys) - 1; i >= 0; i-- {
+				template := &x509.Certificate{
+					SerialNumber:          big.NewInt(int64(i + 1)),
+					Subject:               pkix.Name{CommonName: names[i]},
+					NotBefore:             time.Now().Add(-time.Minute),
+					NotAfter:              time.Now().Add(time.Hour),
+					BasicConstraintsValid: true,
+					IsCA:                  i > 0,
+					KeyUsage:              x509.KeyUsageDigitalSignature,
+				}
+				if i > 0 {
+					template.KeyUsage |= x509.KeyUsageCertSign
+				}
+				if parent == nil {
+					parent, signer = template, keys[i]
+				}
+				der, err := x509.CreateCertificate(rand.Reader, template, parent, keys[i].Public(), signer)
+				if err != nil {
+					t.Fatal(err)
+				}
+				parsed, err := x509.ParseCertificate(der)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if i < len(keys)-1 {
+					if err := parsed.CheckSignatureFrom(parent); err != nil {
+						t.Fatal(err)
+					}
+				}
+				chain[i], parent, signer = der, parsed, keys[i]
+			}
+			if tt.malformed {
+				chain[1] = []byte("invalid certificate")
+			}
+			var certPEM bytes.Buffer
+			for _, der := range chain {
+				certPEM.Write(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+			}
+			listenErr := errors.New("stop before listen")
+			called := false
+			_, err := NewListener(NewListenerReq{
+				CertPEM: certPEM.String(),
+				KeyPEM:  keyPEM,
+				ListenPacket: func(string, string) (net.PacketConn, error) {
+					called = true
+					return nil, listenErr
+				},
+				WireSecret:   bytes.Repeat([]byte{0x24}, minimumWireSecretSize),
+				WireIdentity: testWireIdentity,
+			})
+			if tt.wantErr != "" {
+				if called || err == nil || err.Error() != tt.wantErr {
+					t.Fatalf("listen called=%v, err=%v; want %q before listen", called, err, tt.wantErr)
+				}
+			} else if !called || !errors.Is(err, listenErr) {
+				t.Fatalf("valid CA chain rejected: listen called=%v, err=%v", called, err)
 			}
 		})
 	}

@@ -23,6 +23,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
@@ -406,6 +407,17 @@ func NewListener(req NewListenerReq) (*Listener, error) {
 	if key, ok := certificate.PrivateKey.(*rsa.PrivateKey); ok && key.N.BitLen() < 2048 {
 		wire.Close()
 		return nil, errors.New("TalariaUDP certificate RSA key must be at least 2048 bits")
+	}
+	for _, der := range certificate.Certificate[1:] {
+		issuer, err := x509.ParseCertificate(der)
+		if err != nil {
+			wire.Close()
+			return nil, errors.New("TalariaUDP CA certificate is invalid")
+		}
+		if key, ok := issuer.PublicKey.(*rsa.PublicKey); ok && key.N.BitLen() < 2048 {
+			wire.Close()
+			return nil, errors.New("TalariaUDP CA RSA key must be at least 2048 bits")
+		}
 	}
 	getCertificate := func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &certificate, nil }
 	carrierMaxPacket := wire.packetSize(wireMaxPacket)

@@ -187,6 +187,15 @@ func validateStaticServerCertificate(certificate tls.Certificate) (*x509.Certifi
 	default:
 		return nil, errors.New("server tls custom private keys are not supported")
 	}
+	for _, der := range certificate.Certificate[1:] {
+		ca, err := x509.ParseCertificate(der)
+		if err != nil {
+			return nil, errors.New("server tls CA certificate is invalid")
+		}
+		if key, ok := ca.PublicKey.(*rsa.PublicKey); ok && key.N.BitLen() < 2048 {
+			return nil, errors.New("server tls CA RSA key must be at least 2048 bits")
+		}
+	}
 	return leaf, nil
 }
 
