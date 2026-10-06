@@ -1319,7 +1319,7 @@ func readTunPacketToBuffer(tun platform.Tun, pkt *dataplane.PacketBuffer) (int, 
 	return n, nil
 }
 
-// writeTunPacketBuffer drops payloads rejected by ParseIPPacket and returns (0, nil).
+// writeTunPacketBuffer returns (0, nil) for non-IPv4 payloads or parse failures.
 func writeTunPacketBuffer(ctx context.Context, tun platform.Tun, pkt *dataplane.PacketBuffer) (int, error) {
 	if tun == nil || pkt == nil {
 		return 0, io.ErrUnexpectedEOF
@@ -1330,7 +1330,7 @@ func writeTunPacketBuffer(ctx context.Context, tun platform.Tun, pkt *dataplane.
 	if pkt.Len() <= 0 {
 		return 0, nil
 	}
-	if _, err := ippacket.ParseIPPacket(pkt.Bytes()); err != nil {
+	if ipPacket, err := ippacket.ParseIPPacket(pkt.Bytes()); err != nil || !ipPacket.IsIPv4() {
 		return 0, nil
 	}
 	expected := pkt.Len()

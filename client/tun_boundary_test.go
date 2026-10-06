@@ -51,13 +51,18 @@ func TestDownlinkTunWriterDropsWhenQueueIsFull(t *testing.T) {
 
 func TestDownlinkTunWriterDoesNotCountDroppedPackets(t *testing.T) {
 	valid := testIPv4Packet()
+	ipv6 := make([]byte, 40)
+	ipv6[0], ipv6[6], ipv6[7] = 0x60, 59, 64
+	ipv6[8], ipv6[9], ipv6[10], ipv6[11], ipv6[23] = 0x20, 0x01, 0x0d, 0xb8, 1
+	copy(ipv6[24:40], ipv6[8:24])
+	ipv6[39] = 2
 	tun := &invalidProgressTun{writeN: len(valid)}
 	stats := &tunWriteStats{}
 	var callbackErr error
-	writer := newDownlinkTunWriter(context.Background(), tun, 2, stats, func(err error) {
+	writer := newDownlinkTunWriter(context.Background(), tun, 3, stats, func(err error) {
 		callbackErr = err
 	})
-	for _, data := range [][]byte{{0x45, 0, 0}, valid} {
+	for _, data := range [][]byte{{0x45, 0, 0}, ipv6, valid} {
 		pkt := &dataplane.PacketBuffer{Raw: data, End: len(data)}
 		if err := writer.writeBuffer(pkt, nil); err != nil {
 			writer.close()
