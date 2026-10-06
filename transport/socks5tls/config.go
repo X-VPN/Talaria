@@ -12,8 +12,10 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"math/big"
 	"net"
 	"reflect"
+	"slices"
 	"time"
 )
 
@@ -141,13 +143,48 @@ func normalizeServerTLSConfig(cfg *tls.Config) (*tls.Config, error) {
 		return nil, errors.New("server tls min version must allow TLS 1.3")
 	}
 	clone := cfg.Clone()
-	clone.Certificates = append([]tls.Certificate(nil), cfg.Certificates...)
+	clone.Certificates = slices.Clone(cfg.Certificates)
 	for i := range clone.Certificates {
-		leaf, err := validateStaticServerCertificate(clone.Certificates[i])
+		certificate := &clone.Certificates[i]
+		certificate.Certificate = slices.Clone(certificate.Certificate)
+		for j := range certificate.Certificate {
+			certificate.Certificate[j] = slices.Clone(certificate.Certificate[j])
+		}
+		leaf, err := validateStaticServerCertificate(*certificate)
 		if err != nil {
 			return nil, err
 		}
-		clone.Certificates[i].Leaf = leaf
+		certificate.Leaf = leaf
+		certificate.SupportedSignatureAlgorithms = slices.Clone(certificate.SupportedSignatureAlgorithms)
+		certificate.OCSPStaple = slices.Clone(certificate.OCSPStaple)
+		certificate.SignedCertificateTimestamps = slices.Clone(certificate.SignedCertificateTimestamps)
+		for j := range certificate.SignedCertificateTimestamps {
+			certificate.SignedCertificateTimestamps[j] = slices.Clone(certificate.SignedCertificateTimestamps[j])
+		}
+		switch key := certificate.PrivateKey.(type) {
+		case *rsa.PrivateKey:
+			owned := *key
+			owned.N = new(big.Int).Set(key.N)
+			if key.D != nil {
+				owned.D = new(big.Int).Set(key.D)
+			}
+			owned.Primes = slices.Clone(key.Primes)
+			for j, prime := range key.Primes {
+				if prime != nil {
+					owned.Primes[j] = new(big.Int).Set(prime)
+				}
+			}
+			owned.Precomputed = rsa.PrecomputedValues{}
+			owned.Precompute()
+			certificate.PrivateKey = &owned
+		case *ecdsa.PrivateKey:
+			certificate.PrivateKey = &ecdsa.PrivateKey{
+				PublicKey: ecdsa.PublicKey{Curve: key.Curve, X: new(big.Int).Set(key.X), Y: new(big.Int).Set(key.Y)},
+				D:         new(big.Int).Set(key.D),
+			}
+		case ed25519.PrivateKey:
+			certificate.PrivateKey = slices.Clone(key)
+		}
 	}
 	clone.NameToCertificate = nil
 	clone.MinVersion = tls.VersionTLS13
