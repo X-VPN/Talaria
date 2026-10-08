@@ -6,6 +6,7 @@ package client_test
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"io"
 	"net"
 	"sync"
@@ -64,7 +65,8 @@ func TestMemorySessionEcho(t *testing.T) {
 			}
 
 			payload := make([]byte, tt.payloadSize)
-			payload[0] = 0x45
+			payload[0], payload[9] = 0x45, 253
+			binary.BigEndian.PutUint16(payload[2:4], uint16(len(payload)))
 			if err := tun.Inject(payload); err != nil {
 				t.Fatal(err)
 			}
@@ -125,7 +127,7 @@ func TestEndpointSessionMovesPackets(t *testing.T) {
 		t.Fatal(ctx.Err())
 	}
 
-	upload := []byte{0x45, 0, 0, 20, 0, 0, 0, 0, 64, 1, 0, 0, 10, 1, 0, 2, 10, 2, 0, 1}
+	upload := []byte{0x45, 0, 0, 20, 0, 0, 0, 0, 64, 253, 0, 0, 10, 1, 0, 2, 10, 2, 0, 1}
 	if err := tun.Inject(upload); err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +140,7 @@ func TestEndpointSessionMovesPackets(t *testing.T) {
 		t.Fatal(ctx.Err())
 	}
 
-	download := []byte{0x45, 0, 0, 20, 0, 0, 0, 0, 64, 1, 0, 0, 10, 2, 0, 1, 10, 1, 0, 2}
+	download := []byte{0x45, 0, 0, 20, 0, 0, 0, 0, 64, 253, 0, 0, 10, 2, 0, 1, 10, 1, 0, 2}
 	endpoint.incoming <- &vpnpacket.VpnPacket{Cmd: vpnpacket.CmdData, Data: download}
 	out, err := tun.ReadOutput(ctx)
 	if err != nil {
@@ -176,7 +178,7 @@ func TestEndpointSessionUsesBufferedEndpointAndOffsetTun(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	upload := []byte{0x45, 0, 0, 20, 0, 0, 0, 0, 64, 1, 0, 0, 10, 1, 0, 2, 10, 2, 0, 1}
+	upload := []byte{0x45, 0, 0, 20, 0, 0, 0, 0, 64, 253, 0, 0, 10, 1, 0, 2, 10, 2, 0, 1}
 	if err := tun.Inject(upload); err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +194,7 @@ func TestEndpointSessionUsesBufferedEndpointAndOffsetTun(t *testing.T) {
 		t.Fatal("expected endpoint session to read TUN with ReadPacketOffset")
 	}
 
-	download := []byte{0x45, 0, 0, 20, 0, 0, 0, 0, 64, 1, 0, 0, 10, 2, 0, 1, 10, 1, 0, 2}
+	download := []byte{0x45, 0, 0, 20, 0, 0, 0, 0, 64, 253, 0, 0, 10, 2, 0, 1, 10, 1, 0, 2}
 	endpoint.bufferedPayloads <- download
 	out, err := tun.ReadOutput(ctx)
 	if err != nil {
@@ -233,7 +235,7 @@ func TestEndpointSessionUsesBorrowedPayloadEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	download := []byte{0x45, 0, 0, 20, 0, 0, 0, 0, 64, 1, 0, 0, 10, 2, 0, 1, 10, 1, 0, 2}
+	download := []byte{0x45, 0, 0, 20, 0, 0, 0, 0, 64, 253, 0, 0, 10, 2, 0, 1, 10, 1, 0, 2}
 	endpoint.borrowedPayloads <- download
 	out, err := tun.ReadOutput(ctx)
 	if err != nil {

@@ -5,9 +5,13 @@ package socks5tls
 
 import (
 	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"io"
+	"math/big"
 	"testing"
 	"time"
 )
@@ -155,6 +159,127 @@ func TestNewServerRejectsCustomTLSPrivateKey(t *testing.T) {
 		t.Fatalf("server result = %v, %v", server, err)
 	}
 	_ = listener.Close()
+}
+
+func TestNormalizeServerTLSConfigRSAKeySize(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		bits    int
+		wantErr bool
+	}{
+		{name: "1024 bits", bits: 1024, wantErr: true},
+		{name: "2047 bits", bits: 2047, wantErr: true},
+		{name: "2048 bits", bits: 2048},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			key, err := rsa.GenerateKey(rand.Reader, tt.bits)
+			if err != nil {
+				t.Fatal(err)
+			}
+			template := &x509.Certificate{
+				SerialNumber:       big.NewInt(1),
+				SignatureAlgorithm: x509.SHA256WithRSA,
+				NotBefore:          time.Now().Add(-time.Minute),
+				NotAfter:           time.Now().Add(time.Hour),
+			}
+			der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = normalizeServerTLSConfig(&tls.Config{Certificates: []tls.Certificate{{
+				Certificate: [][]byte{der},
+				PrivateKey:  key,
+			}}})
+			if tt.wantErr {
+				if err == nil || err.Error() != "server tls RSA key must be at least 2048 bits" {
+					t.Fatalf("expected RSA key size error, got %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestNormalizeServerTLSConfigCAKeySize(t *testing.T) {
+	config, _ := testTLSConfigs(t)
+	serverKey := config.Certificates[0].PrivateKey.(crypto.Signer)
+	rsaKeys := make(map[int]crypto.Signer)
+	for _, bits := range []int{1024, 2047, 2048} {
+		key, err := rsa.GenerateKey(rand.Reader, bits)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rsaKeys[bits] = key
+	}
+	const weakRSA = "server tls CA RSA key must be at least 2048 bits"
+	for _, tt := range []struct {
+		name         string
+		intermediate crypto.Signer
+		root         crypto.Signer
+		malformed    bool
+		wantErr      string
+	}{
+		{name: "1024-bit intermediate", intermediate: rsaKeys[1024], root: rsaKeys[2048], wantErr: weakRSA},
+		{name: "1024-bit root", intermediate: rsaKeys[2048], root: rsaKeys[1024], wantErr: weakRSA},
+		{name: "2047-bit intermediate", intermediate: rsaKeys[2047], root: rsaKeys[2048], wantErr: weakRSA},
+		{name: "2048-bit CAs", intermediate: rsaKeys[2048], root: rsaKeys[2048]},
+		{name: "ECDSA CAs", intermediate: serverKey, root: serverKey},
+		{name: "malformed intermediate", intermediate: rsaKeys[2048], root: rsaKeys[2048], malformed: true, wantErr: "server tls CA certificate is invalid"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			keys := []crypto.Signer{serverKey, tt.intermediate, tt.root}
+			names := []string{"vpn.test", "intermediate", "root"}
+			chain := make([][]byte, len(keys))
+			var parent *x509.Certificate
+			var signer crypto.Signer
+			for i := len(keys) - 1; i >= 0; i-- {
+				template := &x509.Certificate{
+					SerialNumber:          big.NewInt(int64(i + 1)),
+					Subject:               pkix.Name{CommonName: names[i]},
+					NotBefore:             time.Now().Add(-time.Minute),
+					NotAfter:              time.Now().Add(time.Hour),
+					BasicConstraintsValid: true,
+					IsCA:                  i > 0,
+					KeyUsage:              x509.KeyUsageDigitalSignature,
+				}
+				if i > 0 {
+					template.KeyUsage |= x509.KeyUsageCertSign
+				}
+				if parent == nil {
+					parent, signer = template, keys[i]
+				}
+				der, err := x509.CreateCertificate(rand.Reader, template, parent, keys[i].Public(), signer)
+				if err != nil {
+					t.Fatal(err)
+				}
+				parsed, err := x509.ParseCertificate(der)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if i < len(keys)-1 {
+					if err := parsed.CheckSignatureFrom(parent); err != nil {
+						t.Fatal(err)
+					}
+				}
+				chain[i], parent, signer = der, parsed, keys[i]
+			}
+			if tt.malformed {
+				chain[1] = []byte("invalid certificate")
+			}
+			_, err := normalizeServerTLSConfig(&tls.Config{Certificates: []tls.Certificate{{
+				Certificate: chain,
+				PrivateKey:  serverKey,
+			}}})
+			if tt.wantErr != "" {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Fatalf("expected %q, got %v", tt.wantErr, err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
 }
 
 func TestNewServerRejectsTLSClientAuthentication(t *testing.T) {

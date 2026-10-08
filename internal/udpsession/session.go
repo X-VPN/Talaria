@@ -514,37 +514,64 @@ func (l *Listener) terminate(err error) {
 	_ = l.Close()
 }
 
-func (l *Listener) handleReadError(err error, consecutive *int) bool {
+type readErrorAction uint8
+
+const (
+	readErrorUnknown readErrorAction = iota
+	readErrorDrop
+	readErrorRetry
+	readErrorFatal
+)
+
+type readErrorState struct {
+	failures int
+	backoff  time.Duration
+}
+
+func (l *Listener) handleReadError(err error, state *readErrorState) bool {
 	select {
 	case <-l.closeCh:
 		return false
 	default:
 	}
-	// Timeout is the only portable retry classification; Temporary is
-	// deprecated because non-timeout temporary errors are ill-defined.
+	if errors.Is(err, net.ErrClosed) || errors.Is(err, extension.ErrPanic) {
+		l.terminate(err)
+		return false
+	}
+	action := classifyReadError(err)
 	var timeoutErr interface{ Timeout() bool }
-	if errors.As(err, &timeoutErr) && timeoutErr.Timeout() {
-		*consecutive = 0
+	if action == readErrorUnknown && errors.As(err, &timeoutErr) && timeoutErr.Timeout() {
+		action = readErrorRetry
+	}
+	switch action {
+	case readErrorFatal:
+		l.terminate(err)
+		return false
+	case readErrorDrop:
+		// This error consumed a datagram or network notification. Keep
+		// receiving without delaying other clients on the shared socket.
+		*state = readErrorState{}
 		return true
+	case readErrorRetry:
+		state.failures = 0
+	default:
+		// Preserve bounded failure reporting for unrecognized errors,
+		// including permanent failures from a custom PacketConn.
+		if state.failures == 0 {
+			state.backoff = 0
+		}
+		state.failures++
+		if state.failures >= readErrorLimit {
+			l.terminate(err)
+			return false
+		}
 	}
-	if errors.Is(err, net.ErrClosed) {
-		l.terminate(err)
-		return false
+	if state.backoff == 0 {
+		state.backoff = readErrorInitialBackoff
+	} else {
+		state.backoff = min(state.backoff*2, readErrorMaxBackoff)
 	}
-	(*consecutive)++
-	if *consecutive >= readErrorLimit {
-		l.terminate(err)
-		return false
-	}
-	shift := *consecutive - 1
-	if shift > 20 {
-		shift = 20
-	}
-	backoff := readErrorInitialBackoff << shift
-	if backoff > readErrorMaxBackoff {
-		backoff = readErrorMaxBackoff
-	}
-	timer := time.NewTimer(backoff)
+	timer := time.NewTimer(state.backoff)
 	defer timer.Stop()
 	select {
 	case <-l.closeCh:
@@ -613,7 +640,7 @@ func (l *Listener) readLoopSimple() {
 	var lastKey sessionKey
 	var lastConn *Conn
 	var hasLast bool
-	readFailures := 0
+	var readErrors readErrorState
 	for {
 		select {
 		case <-l.closeCh:
@@ -624,7 +651,7 @@ func (l *Listener) readLoopSimple() {
 		n, addr, err := l.pc.ReadFrom(buf)
 		if err != nil {
 			l.bufPool.Put(buf)
-			if !l.handleReadError(err, &readFailures) {
+			if !l.handleReadError(err, &readErrors) {
 				return
 			}
 			continue
@@ -634,7 +661,7 @@ func (l *Listener) readLoopSimple() {
 			l.terminate(fmt.Errorf("invalid ReadFrom result: n=%d buffer=%d addr=%v", n, len(buf), addr))
 			return
 		}
-		readFailures = 0
+		readErrors = readErrorState{}
 		if n <= 0 {
 			l.bufPool.Put(buf)
 			continue
@@ -669,7 +696,7 @@ func (l *Listener) readLoopGRO() {
 	var lastKey sessionKey
 	var lastConn *Conn
 	var hasLast bool
-	readFailures := 0
+	var readErrors readErrorState
 	oob := make([]byte, udpControlSize())
 	for {
 		select {
@@ -688,12 +715,12 @@ func (l *Listener) readLoopGRO() {
 		n, oobn, _, addr, err := l.udpConn.ReadMsgUDP(buf, oob)
 		if err != nil {
 			l.bufPool.Put(buf)
-			if !l.handleReadError(err, &readFailures) {
+			if !l.handleReadError(err, &readErrors) {
 				return
 			}
 			continue
 		}
-		readFailures = 0
+		readErrors = readErrorState{}
 		if n <= 0 {
 			l.bufPool.Put(buf)
 			continue
@@ -783,7 +810,7 @@ func (l *Listener) readLoopBatchV4() {
 	var lastKey sessionKey
 	var lastConn *Conn
 	var hasLast bool
-	readFailures := 0
+	var readErrors readErrorState
 	for {
 		select {
 		case <-l.closeCh:
@@ -803,12 +830,12 @@ func (l *Listener) readLoopBatchV4() {
 			for i := 0; i < batchN; i++ {
 				pkts[i].release()
 			}
-			if !l.handleReadError(err, &readFailures) {
+			if !l.handleReadError(err, &readErrors) {
 				return
 			}
 			continue
 		}
-		readFailures = 0
+		readErrors = readErrorState{}
 		for i := n; i < batchN; i++ {
 			pkts[i].release()
 		}
@@ -852,7 +879,7 @@ func (l *Listener) readLoopBatchV6() {
 	var lastKey sessionKey
 	var lastConn *Conn
 	var hasLast bool
-	readFailures := 0
+	var readErrors readErrorState
 	for {
 		select {
 		case <-l.closeCh:
@@ -872,12 +899,12 @@ func (l *Listener) readLoopBatchV6() {
 			for i := 0; i < batchN; i++ {
 				pkts[i].release()
 			}
-			if !l.handleReadError(err, &readFailures) {
+			if !l.handleReadError(err, &readErrors) {
 				return
 			}
 			continue
 		}
-		readFailures = 0
+		readErrors = readErrorState{}
 		for i := n; i < batchN; i++ {
 			pkts[i].release()
 		}

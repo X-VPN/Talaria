@@ -7,10 +7,12 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/X-VPN/Talaria/internal/extension"
@@ -18,11 +20,15 @@ import (
 
 func TestListenerPersistentReadErrorBacksOffAndWakesAccept(t *testing.T) {
 	tests := []struct {
-		name string
-		err  error
+		name  string
+		err   error
+		reads int32
 	}{
-		{name: "plain", err: errors.New("synthetic persistent read failure")},
-		{name: "legacy temporary", err: legacyTemporaryReadError{}},
+		{name: "plain", err: errors.New("synthetic persistent read failure"), reads: readErrorLimit},
+		{name: "legacy temporary", err: legacyTemporaryReadError{}, reads: readErrorLimit},
+		{name: "closed", err: net.ErrClosed, reads: 1},
+		{name: "closed and timeout", err: errors.Join(net.ErrClosed, os.ErrDeadlineExceeded), reads: 1},
+		{name: "extension panic", err: extension.ErrPanic, reads: 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -39,10 +45,10 @@ func TestListenerPersistentReadErrorBacksOffAndWakesAccept(t *testing.T) {
 			if _, err := listener.Accept(ctx); !errors.Is(err, tt.err) {
 				t.Fatalf("Accept() error = %v want %v", err, tt.err)
 			}
-			if got := pc.reads.Load(); got != readErrorLimit {
-				t.Fatalf("packet reads = %d want %d", got, readErrorLimit)
+			if got := pc.reads.Load(); got != tt.reads {
+				t.Fatalf("packet reads = %d want %d", got, tt.reads)
 			}
-			if elapsed := time.Since(start); elapsed < readErrorInitialBackoff {
+			if elapsed := time.Since(start); tt.reads > 1 && elapsed < readErrorInitialBackoff {
 				t.Fatalf("persistent read failures spun without backoff: %s", elapsed)
 			}
 			deadline := time.Now().Add(time.Second)
@@ -53,6 +59,115 @@ func TestListenerPersistentReadErrorBacksOffAndWakesAccept(t *testing.T) {
 				t.Fatal("terminal read error did not close packet connection")
 			}
 		})
+	}
+}
+
+func TestListenerRecoversReadTimeout(t *testing.T) {
+	testListenerRecoversReadError(t, os.ErrDeadlineExceeded)
+}
+
+func testListenerRecoversReadError(t *testing.T, readErr error) {
+	t.Helper()
+	synctest.Test(t, func(t *testing.T) {
+		pc := &scriptedReadErrorPacketConn{
+			reentrantClosePacketConn: reentrantClosePacketConn{closed: make(chan struct{})},
+			packets:                  make(chan scriptedReadResult, 16),
+		}
+		listener, err := NewListener(NewListenerReq{PacketConn: pc})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer listener.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		peer := &net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 10001}
+		pc.packets <- scriptedReadResult{data: "before", addr: peer}
+		conn, err := listener.Accept(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf := make([]byte, 16)
+		if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if n, err := conn.Read(buf); err != nil || string(buf[:n]) != "before" {
+			t.Fatalf("initial read = %q, %v", buf[:n], err)
+		}
+		unknown := errors.New("unclassified read failure")
+		wrapped := &net.OpError{Op: "read", Net: "udp", Err: os.NewSyscallError("recvfrom", readErr)}
+		// Recoverable errors must neither consume nor inherit the unknown
+		// error budget. Even partial data returned with an error is discarded.
+		for _, err := range []error{unknown, unknown, wrapped, wrapped, wrapped, wrapped, unknown, unknown} {
+			pc.packets <- scriptedReadResult{data: "partial", addr: peer, err: err}
+		}
+		pc.packets <- scriptedReadResult{data: "after", addr: peer}
+		if n, err := conn.Read(buf); err != nil || string(buf[:n]) != "after" {
+			t.Fatalf("existing session after read errors = %q, %v", buf[:n], err)
+		}
+		// A successful read must also reset the unknown error budget.
+		pc.packets <- scriptedReadResult{err: unknown}
+		pc.packets <- scriptedReadResult{err: unknown}
+		pc.packets <- scriptedReadResult{data: "new", addr: &net.UDPAddr{IP: peer.IP, Port: 10002}}
+		next, err := listener.Accept(ctx)
+		if err != nil {
+			t.Fatalf("new session after read errors: %v", err)
+		}
+		if n, err := next.Read(buf); err != nil || string(buf[:n]) != "new" {
+			t.Fatalf("new session read = %q, %v", buf[:n], err)
+		}
+	})
+}
+
+func TestListenerReadErrorBackoffAndClose(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		listener, err := NewListener(NewListenerReq{
+			PacketConn: &reentrantClosePacketConn{closed: make(chan struct{})}, ManualReceive: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer listener.Close()
+		state := readErrorState{failures: readErrorLimit - 1}
+		for _, delay := range []time.Duration{10, 20, 40, 80, 160, 320, 640, 1000, 1000} {
+			start := time.Now()
+			if !listener.handleReadError(os.ErrDeadlineExceeded, &state) {
+				t.Fatal("timeout terminated listener")
+			}
+			if elapsed := time.Since(start); elapsed != delay*time.Millisecond {
+				t.Fatalf("backoff = %s want %s", elapsed, delay*time.Millisecond)
+			}
+			if state.failures != 0 {
+				t.Fatal("timeout retained unknown failure count")
+			}
+		}
+		done := make(chan bool, 1)
+		go func() { done <- listener.handleReadError(os.ErrDeadlineExceeded, &state) }()
+		synctest.Wait()
+		start := time.Now()
+		_ = listener.Close()
+		if <-done || time.Since(start) != 0 {
+			t.Fatal("Close did not immediately interrupt read backoff")
+		}
+	})
+}
+
+type scriptedReadResult struct {
+	data string
+	addr net.Addr
+	err  error
+}
+
+type scriptedReadErrorPacketConn struct {
+	reentrantClosePacketConn
+	packets chan scriptedReadResult
+}
+
+func (c *scriptedReadErrorPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	select {
+	case result := <-c.packets:
+		return copy(p, result.data), result.addr, result.err
+	case <-c.closed:
+		return 0, nil, net.ErrClosed
 	}
 }
 

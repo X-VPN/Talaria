@@ -1154,13 +1154,16 @@ func decodeCredentialsBytes(user, password []byte, token *[coretransport.DataTok
 		return 0, false
 	}
 	clear(token[:])
+	if len(password) != base64.RawURLEncoding.EncodedLen(len(token)) {
+		return 0, false
+	}
 	clientID, err := strconv.ParseUint(string(user), 10, 64)
-	if err != nil || clientID == 0 {
+	if err != nil || clientID == 0 || string(user) != strconv.FormatUint(clientID, 10) {
 		return 0, false
 	}
 	raw := make([]byte, base64.RawURLEncoding.DecodedLen(len(password)))
 	defer clear(raw)
-	n, err := base64.RawURLEncoding.Decode(raw, password)
+	n, err := base64.RawURLEncoding.Strict().Decode(raw, password)
 	if err != nil || n != len(token) {
 		return 0, false
 	}

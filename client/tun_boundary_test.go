@@ -19,10 +19,11 @@ func TestDownlinkTunWriterDropsWhenQueueIsFull(t *testing.T) {
 	tun := &queueBlockingTun{started: make(chan struct{})}
 	writer := newDownlinkTunWriter(ctx, tun, defaultDownlinkQueueSize, noopStatsSink{}, nil)
 	pool := dataplane.NewPool(256, dataplane.DefaultHeadroom)
+	data := testIPv4Packet()
 	enqueue := func() error {
 		pkt := pool.Get()
-		pkt.Raw[pkt.Start] = 1
-		pkt.End = pkt.Start + 1
+		copy(pkt.Raw[pkt.Start:], data)
+		pkt.End = pkt.Start + len(data)
 		if err := writer.writeBuffer(pkt, pool); err != nil {
 			pool.Put(pkt)
 			return err
@@ -48,6 +49,39 @@ func TestDownlinkTunWriterDropsWhenQueueIsFull(t *testing.T) {
 	writer.close()
 }
 
+func TestDownlinkTunWriterDoesNotCountDroppedPackets(t *testing.T) {
+	valid := testIPv4Packet()
+	ipv6 := make([]byte, 40)
+	ipv6[0], ipv6[6], ipv6[7] = 0x60, 59, 64
+	ipv6[8], ipv6[9], ipv6[10], ipv6[11], ipv6[23] = 0x20, 0x01, 0x0d, 0xb8, 1
+	copy(ipv6[24:40], ipv6[8:24])
+	ipv6[39] = 2
+	tun := &invalidProgressTun{writeN: len(valid)}
+	stats := &tunWriteStats{}
+	var callbackErr error
+	writer := newDownlinkTunWriter(context.Background(), tun, 3, stats, func(err error) {
+		callbackErr = err
+	})
+	for _, data := range [][]byte{{0x45, 0, 0}, ipv6, valid} {
+		pkt := &dataplane.PacketBuffer{Raw: data, End: len(data)}
+		if err := writer.writeBuffer(pkt, nil); err != nil {
+			writer.close()
+			t.Fatalf("enqueue packet: %v", err)
+		}
+	}
+	writer.close()
+	if err := writer.getErr(); err != nil || callbackErr != nil {
+		t.Fatalf("writer error = %v, callback error = %v; want nil", err, callbackErr)
+	}
+	if tun.writes != 1 {
+		t.Fatalf("TUN writes = %d, want 1", tun.writes)
+	}
+	if stats.downloadBytes != len(valid) || stats.tunBytes != len(valid) || stats.tunCalls != 1 {
+		t.Fatalf("download bytes = %d, TUN bytes = %d, TUN callbacks = %d; want %d, %d, 1",
+			stats.downloadBytes, stats.tunBytes, stats.tunCalls, len(valid), len(valid))
+	}
+}
+
 func TestUplinkConnWriterUsesConfiguredQueueSize(t *testing.T) {
 	for _, test := range []struct {
 		configured int
@@ -65,6 +99,7 @@ func TestUplinkConnWriterUsesConfiguredQueueSize(t *testing.T) {
 }
 
 func TestTunHelpersRejectInvalidProgress(t *testing.T) {
+	validIPv4 := testIPv4Packet()
 	t.Run("read overflow", func(t *testing.T) {
 		pkt := &dataplane.PacketBuffer{Raw: make([]byte, 16), Start: 4, End: 4}
 		tun := &invalidProgressTun{readN: 13}
@@ -82,7 +117,7 @@ func TestTunHelpersRejectInvalidProgress(t *testing.T) {
 	})
 
 	t.Run("payload short write", func(t *testing.T) {
-		pkt := &dataplane.PacketBuffer{Raw: []byte{1, 2, 3}, Start: 0, End: 3}
+		pkt := &dataplane.PacketBuffer{Raw: validIPv4, Start: 0, End: len(validIPv4)}
 		tun := &invalidProgressTun{writeN: 2}
 		if n, err := writeTunPacketBuffer(context.Background(), tun, pkt); n != 2 || !errors.Is(err, io.ErrShortWrite) {
 			t.Fatalf("writeTunPacketBuffer() = (%d, %v), want (2, %v)", n, err, io.ErrShortWrite)
@@ -90,7 +125,7 @@ func TestTunHelpersRejectInvalidProgress(t *testing.T) {
 	})
 
 	t.Run("offset short write", func(t *testing.T) {
-		pkt := &dataplane.PacketBuffer{Raw: []byte{0, 1, 2, 3}, Start: 1, End: 4}
+		pkt := &dataplane.PacketBuffer{Raw: append([]byte{0}, validIPv4...), Start: 1, End: 1 + len(validIPv4)}
 		tun := &invalidProgressOffsetTun{invalidProgressTun: invalidProgressTun{writeN: 2}}
 		if n, err := writeTunPacketBuffer(context.Background(), tun, pkt); n != 2 || !errors.Is(err, io.ErrShortWrite) {
 			t.Fatalf("writeTunPacketBuffer() = (%d, %v), want (2, %v)", n, err, io.ErrShortWrite)
@@ -116,6 +151,14 @@ func TestTunHelpersRejectInvalidProgress(t *testing.T) {
 			}
 		}
 	})
+}
+
+func testIPv4Packet() []byte {
+	return []byte{
+		0x45, 0, 0, 28, 0, 1, 0, 0, 64, 1, 0x66, 0xdb,
+		10, 1, 0, 2, 10, 2, 0, 1,
+		8, 0, 0xf7, 0xfd, 0, 1, 0, 1,
+	}
 }
 
 func TestWriteConnFrameRejectsShortWrite(t *testing.T) {
@@ -152,6 +195,20 @@ func (c invalidReadProgressConn) Read([]byte) (int, error) {
 type invalidProgressTun struct {
 	readN  int
 	writeN int
+	writes int
+}
+
+type tunWriteStats struct {
+	noopStatsSink
+	downloadBytes int
+	tunBytes      int
+	tunCalls      int
+}
+
+func (s *tunWriteStats) OnDownloadBytes(_ context.Context, n int) { s.downloadBytes += n }
+func (s *tunWriteStats) OnTunWrite(_ context.Context, n int) {
+	s.tunBytes += n
+	s.tunCalls++
 }
 
 type queueBlockingTun struct {
@@ -171,6 +228,7 @@ func (*queueBlockingTun) Close() error { return nil }
 func (t *invalidProgressTun) Read([]byte) (int, error)  { return t.readN, nil }
 func (t *invalidProgressTun) Write([]byte) (int, error) { return t.writeN, nil }
 func (t *invalidProgressTun) WriteContext(context.Context, []byte) (int, error) {
+	t.writes++
 	return t.writeN, nil
 }
 func (*invalidProgressTun) Close() error { return nil }

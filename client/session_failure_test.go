@@ -53,7 +53,7 @@ func TestSessionFailsWhenAsynchronousTunWriteFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	payload := []byte{0x45, 0, 0, 20, 0, 0, 0, 0, 64, 1, 0, 0, 10, 1, 0, 2, 10, 2, 0, 1}
+	payload := []byte{0x45, 0, 0, 20, 0, 0, 0, 0, 64, 253, 0, 0, 10, 1, 0, 2, 10, 2, 0, 1}
 	if err := tun.Inject(payload); err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestTalariaUDPServerErrorCancelsBlockedTunWrite(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	tun := newBlockingContextTun()
-	payload := []byte{0x45, 0, 0, 20, 0, 0, 0, 0, 64, 1, 0, 0, 10, 1, 0, 2, 10, 2, 0, 1}
+	payload := []byte{0x45, 0, 0, 20, 0, 0, 0, 0, 64, 253, 0, 0, 10, 1, 0, 2, 10, 2, 0, 1}
 	sess, err := client.NewSession(client.Config{
 		Protocol:   client.ProtocolTalariaUDP,
 		ClientID:   "test-client",
@@ -131,7 +131,7 @@ func TestTalariaTCPSessionCloseCancelsBlockedTunWrites(t *testing.T) {
 		{name: "TalariaTCP borrowed", protocol: client.ProtocolTalariaTCP, kind: "borrowed"},
 		{name: "TalariaTCP buffered", protocol: client.ProtocolTalariaTCP, kind: "buffered"},
 	}
-	payload := []byte{0x45, 0, 0, 20, 0, 0, 0, 0, 64, 1, 0, 0, 10, 1, 0, 2, 10, 2, 0, 1}
+	payload := []byte{0x45, 0, 0, 20, 0, 0, 0, 0, 64, 253, 0, 0, 10, 1, 0, 2, 10, 2, 0, 1}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tun := newBlockingContextTun()
@@ -211,7 +211,7 @@ func TestTalariaTCPTransportFailureCancelsBlockedTunWrites(t *testing.T) {
 		{name: "TalariaTCP borrowed", protocol: client.ProtocolTalariaTCP, kind: "borrowed"},
 		{name: "TalariaTCP buffered", protocol: client.ProtocolTalariaTCP, kind: "buffered"},
 	}
-	payload := []byte{0x45, 0, 0, 20, 0, 0, 0, 0, 64, 1, 0, 0, 10, 1, 0, 2, 10, 2, 0, 1}
+	payload := []byte{0x45, 0, 0, 20, 0, 0, 0, 0, 64, 253, 0, 0, 10, 1, 0, 2, 10, 2, 0, 1}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tun := newBlockingContextTun()
@@ -311,7 +311,7 @@ func TestSessionFailsWhenAsynchronousConnWriteFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	payload := []byte{0x45, 0, 0, 20, 0, 0, 0, 0, 64, 1, 0, 0, 10, 1, 0, 2, 10, 2, 0, 1}
+	payload := []byte{0x45, 0, 0, 20, 0, 0, 0, 0, 64, 253, 0, 0, 10, 1, 0, 2, 10, 2, 0, 1}
 	if err := tun.Inject(payload); err != nil {
 		t.Fatal(err)
 	}

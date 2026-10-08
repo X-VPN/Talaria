@@ -16,6 +16,7 @@ import (
 	"github.com/X-VPN/Talaria/client/dataplane"
 	"github.com/X-VPN/Talaria/client/platform"
 	"github.com/X-VPN/Talaria/internal/extension"
+	"github.com/X-VPN/Talaria/internal/ippacket"
 	"github.com/X-VPN/Talaria/protocol/vpnpacket"
 )
 
@@ -242,11 +243,12 @@ func (w *downlinkTunWriter) run() {
 			if item.pool != nil {
 				defer item.pool.Put(item.pkt)
 			}
-			if _, err := writeTunPacketBuffer(w.ctx, w.tun, item.pkt); err != nil {
+			n, err := writeTunPacketBuffer(w.ctx, w.tun, item.pkt)
+			if err != nil || n == 0 {
 				return err
 			}
-			w.stats.OnDownloadBytes(w.ctx, item.n)
-			w.stats.OnTunWrite(w.ctx, item.n)
+			w.stats.OnDownloadBytes(w.ctx, n)
+			w.stats.OnTunWrite(w.ctx, n)
 			return nil
 		}()
 		if err != nil {
@@ -1317,6 +1319,7 @@ func readTunPacketToBuffer(tun platform.Tun, pkt *dataplane.PacketBuffer) (int, 
 	return n, nil
 }
 
+// writeTunPacketBuffer returns (0, nil) for non-IPv4 payloads or parse failures.
 func writeTunPacketBuffer(ctx context.Context, tun platform.Tun, pkt *dataplane.PacketBuffer) (int, error) {
 	if tun == nil || pkt == nil {
 		return 0, io.ErrUnexpectedEOF
@@ -1325,6 +1328,9 @@ func writeTunPacketBuffer(ctx context.Context, tun platform.Tun, pkt *dataplane.
 		return 0, errInvalidTunPacket
 	}
 	if pkt.Len() <= 0 {
+		return 0, nil
+	}
+	if ipPacket, err := ippacket.ParseIPPacket(pkt.Bytes()); err != nil || !ipPacket.IsIPv4() {
 		return 0, nil
 	}
 	expected := pkt.Len()

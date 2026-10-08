@@ -21,7 +21,9 @@ package udptls
 import (
 	"context"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
@@ -401,6 +403,21 @@ func NewListener(req NewListenerReq) (*Listener, error) {
 	if err != nil {
 		wire.Close()
 		return nil, fmt.Errorf("TalariaUDP certificate: %w", err)
+	}
+	if key, ok := certificate.PrivateKey.(*rsa.PrivateKey); ok && key.N.BitLen() < 2048 {
+		wire.Close()
+		return nil, errors.New("TalariaUDP certificate RSA key must be at least 2048 bits")
+	}
+	for _, der := range certificate.Certificate[1:] {
+		issuer, err := x509.ParseCertificate(der)
+		if err != nil {
+			wire.Close()
+			return nil, errors.New("TalariaUDP CA certificate is invalid")
+		}
+		if key, ok := issuer.PublicKey.(*rsa.PublicKey); ok && key.N.BitLen() < 2048 {
+			wire.Close()
+			return nil, errors.New("TalariaUDP CA RSA key must be at least 2048 bits")
+		}
 	}
 	getCertificate := func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &certificate, nil }
 	carrierMaxPacket := wire.packetSize(wireMaxPacket)
@@ -903,6 +920,9 @@ func newServerTLSConn(conn net.Conn, certPEM, keyPEM string) (*tls.Conn, error) 
 func newClientTLSConfig(req NewDialerReq) (*tls.Config, error) {
 	if req.TLSConfig == nil {
 		return nil, fmt.Errorf("TalariaUDP tls_config is required")
+	}
+	if req.TLSConfig.Rand != nil || req.TLSConfig.Time != nil || req.TLSConfig.KeyLogWriter != nil {
+		return nil, fmt.Errorf("TalariaUDP tls Rand, Time, and KeyLogWriter hooks are not supported")
 	}
 	serverName := strings.TrimSpace(req.TLSConfig.ServerName)
 	if serverName == "" {
