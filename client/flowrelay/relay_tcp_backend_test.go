@@ -348,8 +348,12 @@ func TestManagedTunnelRelayOutboundFailureClosesRelay(t *testing.T) {
 	if _, err := relay.readPacket(buf); !errors.Is(err, want) {
 		t.Fatalf("readPacket() error = %v want %v", err, want)
 	}
-	if err := relay.close(); err != nil {
-		t.Fatal(err)
+	deadline := time.Now().Add(time.Second)
+	for relay.closeState.Load() != 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("outbound failure did not finish closing the relay")
+		}
+		time.Sleep(time.Millisecond)
 	}
 	if !backend.closed {
 		t.Fatal("outbound failure did not close the relay backend")
